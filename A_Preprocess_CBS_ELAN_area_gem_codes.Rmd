@@ -1,0 +1,1196 @@
+---
+title: "Data_Loading_ELAN_area_gemeentecodes_leading"
+output: html
+
+---
+
+Load R packages into the workspace
+```{r setup}
+library(haven)
+library(data.table)
+library(memisc)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(zoo)
+library(lubridate)
+library(labelled)
+library(readr)
+library(stringr)
+library(xlsx)
+```
+# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# In CBS the unique ID key is a combination of RINPERSOON and RINPERSOONS####
+# This syntax preprocesses CBS information from multiple files to one "cbs" file with information on date of birth, sex, gemeentecode, level of urbanization of "gemeente" (= municipality), cause of death, date of death, ethnicity by country/continent of origin, disposable household income as a measure of SES, education level, optionally wealth information, yearly aggregated medications, and postal code
+
+# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+#Index:
+# 1. Preparation: define folder names and folder paths change names to most recent -BUS and - TAB files
+
+# 2. start with VSLGTAB file containing : gemeentecodes and verblijfobjects (=rinobjectnr)
+# 3. Define your population, CBS data is selected on this list, so you get only information from individuals you need. #    This file is CBS data based on ELAN Area CBS population by gemeentecodes
+# 4. Add information from GBAADRESOBJECTBUS (this couples individuals to the verblijfobjects and start and end of 
+#    adresses for these individuals)
+# 5. add GBAPERSOONtab, demografic information
+# 6. death diagnoses en dates
+# 7. Merge files ADD_Data, GBAPERSOON and DOODOORZDATUM
+# 8. Selection of cohort 2007-2022 (change years as needed)
+# 9. Add individual income information, also in this step RINPERSOONHKW is needed to be able to add information in household
+#    income in step 10
+# 10. Household income, INHP100HGEST = standardized disposable household income in percentiles
+# 11. Add wealth information (combination of income, savings and assets), optional
+# 12. Medication information (from medicijntab, only ATC4, which is based on Vektis declaration information)
+# 13. Preprocess medication file (we do this here so the file to save contains only ATC you need, otherwise this generates a laggy preprocessing down the line due to its size)
+# 14. Highest attained education in 3 categories
+# 15. Save files
+# 16. Some preprocessing
+# 17. See under point 4.In this preprocessing CBS this step is done as step 4. 
+# 18. Ethnicity, attach file with different subdivision based on CBS country of origin
+# 19. Attach socioecon data only to T0 
+# 20. Add information on urbanization, province, GGD area
+# 21. Merge with education
+# 22. Save
+
+# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+#1.  Preparation, define folder names and folder paths
+# Changes: change names to most recent -BUS and - TAB files
+# In CBS the unique ID key is a combination of RINPERSOON and RINPERSOONS
+```{r}
+start_time = Sys.time()
+# Define the folders names and folder paths, adjust to most recent names
+
+#foldername1 = "G:\\BouwenWonen\\VSLGWBTAB\\"
+#filename1 = "VSLGWB2021TAB03V2.sav" # look up and adjust to the name of the most recent file, : in 2021 this file has been replaced by VSLGTAB )containing only gem code, not wijk and buurt, this because this is less privacy sensitive. 
+
+foldername1 = "G:\\BouwenWonen\\VSLGTAB\\"
+filename1 = "VSLG2023TAB03V1.sav" 
+
+foldername2 = "G:\\Bevolking\\GBAADRESOBJECTBUS\\"
+filename2 = "GBAADRESOBJECT2022BUSV1.sav"
+
+foldername3 = "G:\\BouwenWonen\\VSLPOSTCODEBUS\\"
+filename3 = "VSLPOSTCODEBUSV2023031.sav"
+
+foldername4 = "G:\\Bevolking\\GBAPERSOONTAB\\2022\\"
+filename4 = "GBAPERSOON2022TABV1.sav"
+
+foldername5 = "G:\\Bevolking\\GBAOVERLIJDENTAB\\2022\\"
+filename5 = "GBAOVERLIJDEN2022TABV1.sav"
+```
+
+#2. start with file containing gemeentecodes and verblijfobjects (=rinobjectnr)
+#VSLGWBTAB contains G= gemeente, W= wijk and B= buurtcodes of verblijfobjects, column 2 = Rinobjectnummer, 10-24 = codes 2006 - 2020
+```{r dataloading} 
+GWBTAB = as.data.table(read_spss(paste(foldername1,filename1,sep=""),col_select = c(1,2,10:24)))
+
+GWBTAB = GWBTAB[, .(SOORTOBJECTNUMMER,RINOBJECTNUMMER,gem2007,gem2012,gem2020)]
+
+# visual check gem codes of year 2007, 2012 and 2020> similar> keep only 2020
+GWBTAB = GWBTAB[, .( SOORTOBJECTNUMMER,RINOBJECTNUMMER, gem2020)]
+setnames(GWBTAB, old = "gem2020", new = "gem")
+
+## convert wide format to long format, with column name pattern that contains wc, bc, and gem (this step is not necessary when only the new VSLGTAB is used)
+#GWBTAB = melt(GWBTAB, measure = patterns("gem"), variable.name = "YEAR", value.name = c("gem"))
+
+## year is just a dummy column name that used for the melt function.
+#GWBTAB[,YEAR:=NULL]
+
+
+#GWBTAB = GWBTAB[!duplicated(GWBTAB,by=colnames(GWBTAB),fromLast = T)]
+
+###
+# select persons based on a desired file
+# Get list of unique Rinpersoon based on file needed for your analyses > to be used for selection of  rinpersoon(s) > see file C_Combining all files.rmd
+#A =  unique(dt_gp[,c("RINPERSOONS" ,"RINPERSOON")]) #based on a GP file
+#A =  unique(file[,c("RINPERSOONS" ,"RINPERSOON")]) #make unique
+```
+# 3. Define your population, CBS data is selected on this list, so you get only information from individuals you need. #    This file is CBS data based on ELAN Area CBS population
+```{r}
+# Select individuals based on gemeente codes (with "gemcode" defined as a vector of gemeentecodes needed):
+gem = c("0484","0518","0534","1884","0537","0546","0547", "1916","0553", "0569", "0575", "0579", "0603", "1525", "0626", "0629","0637","0638", "0503", "1842","1926","1783" )
+gemcode = as.data.table(gem)
+
+GWBTAB = merge(GWBTAB, gemcode, by =c("gem"), all.y= TRUE)#only keeps verblijfobjects (=buildings) in ELAN gemeentecodes
+
+#alternatively for medical files the population is defined by unique IDs from the medical file of interest:
+RINPERSOON <- readRDS("H:/file_of_population")
+uniqueN(A$RINPERSOON)#
+
+A =  unique(A[,c("RINPERSOONS" ,"RINPERSOON")]) # unique IDs based on pat file
+```
+
+# List of ELAN Gemeentecodes which could be used to define a specific area
+#0484 = Alphen aan den Rijn
+#0518 = Den Haag
+#0534 = Hillegom
+#1884 = Kaag en Braassem
+#0537 = Katwijk
+#0546 = Leiden
+#0547 = Leiderdorp
+#1916 = Leidschendam - Voorburg
+#0553 = Lisse
+#0569 = Nieuwkoop
+#0575 = Noordwijk
+#0579 = Oegstgeest
+#0603 = Rijswijk
+#1525 = Teylingen
+#0626 = Voorschoten
+#0629 = Wassenaar
+#0637 = Zoetermeer
+#0638 = Zoeterwoude
+
+# op de grens regio Den Haag
+#0503 = Delft
+#1842 = Midden-Delfland
+#1926 = Pijnacker-Nootdorp
+#1783 = Westland
+
+#4. Add information from GBAADRESOBJECTBUS (this couples individuals to the verblijfobjects and start and end of adresses for these ind) and select only the rinperson nrs of the persons we need based on rinpersoon(s) from GP files, 2= rinpersoon, 3= GBADATUMAANVANGADRESHOUDING, 4= GBADATUMEINDEADRESHOUDING, 6= rinobjectnr, gemcode contains gemeentecodes from Haaglanden area
+```{r}
+ADDDATUM= as.data.table(read_spss(paste(foldername2,filename2,sep=""),col_select = c(1,2,3,4,5,6)))
+
+#names(ADDDATUM)
+#Combine with GWBTAB for gem codes, keep onnly rows with information from houses (=rinobjectnummer) from elan area
+ADDDATUM = merge(ADDDATUM, GWBTAB, by = c("SOORTOBJECTNUMMER","RINOBJECTNUMMER"), all.y = TRUE)
+A =  unique(ADDDATUM[,c("RINPERSOONS" ,"RINPERSOON")])#make a file A with the unique persons you need
+
+uniqueN(ADDDATUM$RINPERSOON)
+# 
+
+#count gem codes
+#gem_codes_n <- ADDDATUM[, .N, by = c("RINPERSOONS","RINPERSOON", "gem")][,.N, by = c("gem")][order(-N)]
+
+#C = unique(ADDDATUM$RINOBJECTNUMMER)
+
+#GWBTAB = GWBTAB[C, on=c("RINOBJECTNUMMER"), nomatch =NULL]
+
+# select baded on postal code
+# POSTCODE = as.data.table(read_spss(paste(foldername3,filename3,sep="")))[,c(2,5)]
+# POSTCODE = POSTCODE[RINOBJECTNUMMER %in% unique(GWBTAB$RINOBJECTNUMMER)]
+
+#merge 
+#ADD_DATA = merge(GWBTAB,ADDDATUM,by = "RINOBJECTNUMMER", allow.cartesian = T)
+# ADD_DATA = merge(ADD_DATA,POSTCODE,by = "RINOBJECTNUMMER", all.x=T, allow.cartesian = T)[!is.na(RINPERSOON)]
+
+#remove duplicates
+ADD_DATA = ADDDATUM
+ADD_DATA = ADD_DATA[!duplicated(ADD_DATA,by=c("RINPERSOONS" ,"RINPERSOON","SOORTOBJECTNUMMER","RINOBJECTNUMMER", "gem", "GBADATUMAANVANGADRESHOUDING", "GBADATUMEINDEADRESHOUDING"),fromLast = F)]
+
+# in the current study we use dates based on dates registered in GP file, therefore date calculation is done further down the line
+
+#When selection based on adres is needed:
+# make new variable needed for calculation with dates (here as decimal date, is also possible and easy with lubridate)
+
+#ADD_DATA$GBADATUMEINDEADRESHOUDINGin = decimal_date(as.Date(ADD_DATA$GBADATUMEINDEADRESHOUDING, format = '%Y%m%d'))
+#ADD_DATA$GBADATUMAANVANGADRESHOUDINGin = decimal_date(as.Date(ADD_DATA$GBADATUMAANVANGADRESHOUDING, format = '%Y%m%d'))
+
+#ADD_DATA = ADD_DATA[GBADATUMEINDEADRESHOUDINGin > 2006.98]
+
+### check the last known address (not yet added, because we follow patients for the current study based on registration at a GP practice)
+```
+
+#5. add GBAPERSOONtab, which contains demografic information,1=rinpersoons, 2= rinpersoon, 4 = GBAGESLACHT, 8 = GBAHERKOMSTGROEPERING, 9= GBAGENERATIE, 10 = GBAGEBOORTEJAAR, 11= GBAGEBPPRTEMAAND, 12= GBAGEBOORTEDAG
+```{r}
+GBAPERSOON = as.data.table(read_spss(paste(foldername4,filename4,sep=""),col_select = c(1,2,4,8,9,10:12)))
+
+GBAPERSOON = GBAPERSOON[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+
+GBAPERSOON = unite(GBAPERSOON, "GBAGEBOORTEDATUM", c("GBAGEBOORTEJAAR","GBAGEBOORTEMAAND","GBAGEBOORTEDAG"),sep = "")
+
+rm(ADDDATUM)
+rm(GWBTAB)
+#rm(POSTCODE)
+
+# missing (NA's per column)
+#print(sapply(ADD_DATA, function(x) sum(is.na(x))))
+
+
+save(A, ADD_DATA, GBAPERSOON, file = "H:\\Janet Kist\\Article 3\\data\\elan_cbs.RData")
+```
+
+#6. Define the path of DEATH that is going to be combined
+```{r}
+start_time = Sys.time()
+# 6. add information about deceased individuals from GBAOVERLIJDENTAB (from 1995 onward, contains date of death) for causes of death (ICD10 codes) Do (1995- 2012) and Doodoorztab (2012 and onward)
+DODATUM = as.data.table(read_spss(paste(foldername5,filename5,sep=""),col_select = c(1,2,3)))
+
+# root folder of all the files
+DO_common_path = "G:\\GezondheidWelzijn\\DO\\"
+DO_primary_dirs = list.files(DO_common_path)[13:18]
+
+# create an empty dataframe
+DO_data = data.table()
+
+# loop for each year
+for(dir in DO_primary_dirs){
+    
+  # define root folder with year included
+    sub_folder = list.files(paste(DO_common_path,dir,sep=""))
+    
+    
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+      
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+      
+      # read the datafile
+      if( dir == "2012"){
+         temp_data = as.data.table(read_spss(file = paste(DO_common_path,dir,"\\",filename,sep=""), col_select = c(1,2,9) ))
+         setnames(temp_data, colnames(temp_data), c("RINPERSOONS" ,"RINPERSOON","ICDCODE"))
+         temp_data$RINPERSOON = as.character(temp_data$RINPERSOON)
+         temp_data$ICDCODE = as.character(temp_data$ICDCODE)
+      }
+      else{
+        temp_data = as.data.table(read_spss(file = paste(DO_common_path,dir,"\\",filename,sep=""), col_select = c(1,2,7)))
+        setnames(temp_data, colnames(temp_data), c("RINPERSOONS" ,"RINPERSOON","ICDCODE"))
+        temp_data$RINPERSOON = as.character(temp_data$RINPERSOON)
+        temp_data$ICDCODE = as.character(temp_data$ICDCODE)
+      }
+     
+      DO_data = rbindlist(list(DO_data,temp_data))
+      rm(temp_data)
+      }
+}
+
+# root folder of all the files
+DOORZTAB_common_path = "G:\\GezondheidWelzijn\\DOODOORZTAB\\"
+DOORZTAB_primary_dirs = list.files(DOORZTAB_common_path)
+
+# create an empty dataframe
+DOORZTAB_data = data.table()
+
+# loop for each year datafile
+for(dir in DOORZTAB_primary_dirs){
+    
+  # define root folder with year included
+    sub_folder = list.files(paste(DOORZTAB_common_path,dir,sep=""))
+    
+    
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+      
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+      
+      # read the datafile
+      temp_data = as.data.table(read_spss(file = paste(DOORZTAB_common_path,dir,"\\",filename,sep=""), col_select =  c(1,2,3)))
+      setnames(temp_data, colnames(temp_data), c("RINPERSOONS" ,"RINPERSOON","ICDCODE"))
+      temp_data$RINPERSOON = as.character(temp_data$RINPERSOON)
+      temp_data$ICDCODE = as.character(temp_data$ICDCODE)
+     
+      DOORZTAB_data = rbindlist(list(DOORZTAB_data,temp_data))
+      rm(temp_data)
+      }
+}
+
+
+DOODOORZTAB = rbindlist(list(DO_data,DOORZTAB_data))
+DOODOORZTAB = DOODOORZTAB[!is.na(RINPERSOON)]
+DOODOORZTAB[, RINPERSOON := ifelse(nchar(RINPERSOON) < 9, paste0(strrep("0",times= 9 - nchar(RINPERSOON)),RINPERSOON),RINPERSOON)]
+
+
+DOODOORZDATUM = merge(DOODOORZTAB, DODATUM, by = c("RINPERSOONS" ,"RINPERSOON"), all =T)
+
+DOODOORZDATUM = DOODOORZDATUM[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+```
+# 7. Merge files ADD_Data, GBAPERSOON and DOODOORZDATUM
+```{r}
+ADD_DATA = merge(ADD_DATA,GBAPERSOON,by = c("RINPERSOONS" ,"RINPERSOON"), all= T)
+#head(ADD_DATA)
+
+ADD_DATA = merge(ADD_DATA,DOODOORZDATUM,by = c("RINPERSOONS" ,"RINPERSOON"), all= T)
+
+#date of death < 2007 do not have a icd code> remove these lines
+#after = unique(ADD_DATA[is.na(GBADatumOverlijden) | GBADatumOverlijden >= "20070101"]$RINPERSOON)
+#ADD_DATA = ADD_DATA[after, on=c("RINPERSOONS", "RINPERSOON"), nomatch = NULL]
+
+#ADD_DATA$YEAR = ifelse(is.na(ADD_DATA$YEAR), substr(ADD_DATA$GBADATUMEINDEADRESHOUDING,1,4),ADD_DATA$YEAR)
+
+ADD_DATA = ADD_DATA[!duplicated(ADD_DATA,by=colnames(ADD_DATA),fromLast = T)]
+uniqueN(ADD_DATA$RINPERSOON)
+#3140119
+
+#Checks
+
+uniqueN(ADD_DATA[is.na(ICDCODE) & !is.na(GBADatumOverlijden) & GBADatumOverlijden < 2023][,c("RINPERSOON","GBADatumOverlijden","ICDCODE","GBADATUMEINDEADRESHOUDING","GBADATUMAANVANGADRESHOUDING")]$RINPERSOON)
+#xx unique have a death date, but no icd code
+t = ADD_DATA[is.na(ICDCODE) & !is.na(GBADatumOverlijden)]
+uniqueN(t$RINPERSOON)#xx
+tt = ADD_DATA[!is.na(ICDCODE) & !is.na(GBADatumOverlijden)]
+uniqueN(tt$RINPERSOON)#xx
+x/(x)*100#=ca % missing ICD code when date deceased is known####
+
+uniqueN(ADD_DATA$RINPERSOON)
+
+rm(DO_data)
+rm(DOORZTAB_data)
+rm(DODATUM)
+rm(DOODOORZTAB)
+rm(DOODOORZDATUM)
+rm(GBAPERSOON)
+```
+
+# 8. Selection of cohort 2006-2022 (change years as needed), Perined has data untill 2000, other ELAN files start 2007 as the earliest
+```{r}
+#Remove rows with certain dates####
+#ADD_DATA = ADD_DATA[!(GBADATUMAANVANGADRESHOUDING > "2020701")] #run this line when you want to max out your datatable to a date
+ADD_DATA = ADD_DATA[!(GBADATUMEINDEADRESHOUDING < 2006 & GBADATUMAANVANGADRESHOUDING < 2006)] 
+# this is specified to include (for now) the year 2006, we need this to be able to attach in later steps socioeconomic (ses) information of the previous year, in the analyses we will use the ses of the previous year, because in the year of death, SES income is incomplete
+uniqueN(ADD_DATA$RINPERSOON)
+```
+# 9. Individual income information, also in this step RINPERSOONHKW is selected based on the RINPERSOON nr we need (A), this RINPERSOONHKW is needed to add information in household income in step 10
+```{r}
+# root folder of all the files
+IPI_common_path = "G:\\InkomenBestedingen\\INTEGRAAL PERSOONLIJK INKOMEN\\"
+IPI_primary_dirs = list.files(IPI_common_path)[4:8]
+
+# create an empty dataframe
+IPI_data = data.table()
+
+
+# loop for each year
+for(dir in IPI_primary_dirs){
+    
+  # define root folder with year included
+    sub_folder = list.files(paste(IPI_common_path,dir,sep=""))
+    
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+      
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+      
+      # read the datafile
+      temp_data = as.data.table(read_sav(file = paste(IPI_common_path,dir,"\\",filename,sep=""), col_select = c(1,2,3,4)))
+      
+      setnames(temp_data, colnames(temp_data), c("RINPERSOONS" ,"RINPERSOON","RINPERSOONSHKW","RINPERSOONHKW"))
+      
+      temp_data = temp_data[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+      
+      temp_data$YEAR = dir
+      
+      IPI_data = rbindlist(list(IPI_data,temp_data))
+      rm(temp_data)
+      }
+}
+IPI_data = IPI_data[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+
+#,12,13
+#,"INPP100PPERS","INPP100PPRIM"
+
+INPATAB_common_path = "G:\\InkomenBestedingen\\INPATAB\\"
+INPATAB_primary_dirs = list.files(INPATAB_common_path)
+
+## create an empty dataframe
+INPATAB_data = data.table()
+
+
+
+for(dir in INPATAB_primary_dirs){
+
+  # define root folder with year included
+    sub_folder = (paste(INPATAB_common_path,dir,sep=""))
+
+
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+
+      temp_data = as.data.table(read_sav(file = filename, col_select = c(1,2,3,4)))
+
+      temp_data = temp_data[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+      temp_data$YEAR = substr(dir,5,8)
+
+      INPATAB_data = rbindlist(list(INPATAB_data,temp_data))
+      rm(temp_data)
+    }
+}
+#,23,24
+
+INPATAB_data = INPATAB_data[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+
+#INPP100PPERS_label = attr(INPATAB_data$INPP100PPERS,which = "label")
+#INPP100PPERS_labels = attr(INPATAB_data$INPP100PPERS,which = "labels")
+#INPP100PPRIM_label = attr(INPATAB_data$INPP100PPRIM,which = "label")
+#INPP100PPRIM_labels = attr(INPATAB_data$INPP100PPRIM,which = "labels")
+
+
+#IPI_data[,INPP100PPERS:= as.character(INPP100PPERS)]
+#IPI_data[,INPP100PPRIM:= as.character(INPP100PPRIM)]
+#INPATAB_data[,INPP100PPERS:= as.character(INPP100PPERS)]
+#INPATAB_data[,INPP100PPRIM:= as.character(INPP100PPRIM)]
+
+INPATAB_data = rbindlist(list(IPI_data,INPATAB_data))
+rm(IPI_data)
+
+#attr(INPATAB_data$INPP100PPRIM, "labels") = INPP100PPRIM_labels
+#attr(INPATAB_data$INPP100PPRIM, "label") = INPP100PPRIM_label
+#attr(INPATAB_data$INPP100PPERS, "label") = INPP100PPERS_label 
+#attr(INPATAB_data$INPP100PPERS, "labels")= INPP100PPERS_labels 
+```
+
+# 10. Household income, these are in IHI (2006-2011) and INHATab (later years)
+```{r}
+
+# root folder of all the files
+IHI_common_path = "G:\\InkomenBestedingen\\INTEGRAAL HUISHOUDENS INKOMEN\\"
+IHI_primary_dirs = list.files(IHI_common_path)[4:8]  ## 2006-2010 
+
+B = unique(INPATAB_data[, c("RINPERSOONSHKW","RINPERSOONHKW")])
+
+# create an empty dataframe
+IHI_data = data.table()
+
+# loop for each year
+for(dir in IHI_primary_dirs){
+    
+  # define root folder with year included
+    sub_folder = list.files(paste(IHI_common_path,dir,sep=""))
+    
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+      
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+      
+      # read the datafile
+      temp_data = as.data.table(read_spss(file = paste(IHI_common_path,dir,"\\",filename,sep=""), col_select = c(1,2,19))) # 19 = INHP100HGEST
+      setnames(temp_data, colnames(temp_data), c("RINPERSOONSHKW","RINPERSOONHKW","INHP100HGEST"))
+      
+      temp_data = temp_data[B, on=c("RINPERSOONSHKW","RINPERSOONHKW"), nomatch =NULL]
+      
+      temp_data$YEAR = dir
+      
+      IHI_data = rbindlist(list(IHI_data,temp_data))
+      rm(temp_data)
+      }
+}
+
+
+IHI_data = IHI_data[B, on=c("RINPERSOONSHKW" ,"RINPERSOONHKW"), nomatch =NULL]
+
+INHATAB_common_path = "G:\\InkomenBestedingen\\INHATAB\\"
+INHATAB_primary_dirs = list.files(INHATAB_common_path)[2:12] ## rows concerning 2011-2021 
+
+# create an empty dataframe
+INHATAB_data = data.table()
+
+
+for(dir in INHATAB_primary_dirs){
+    
+  # define root folder with year included
+    sub_folder = (paste(INHATAB_common_path,dir,sep=""))
+    
+    
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+      
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+
+      temp_data = as.data.table(read_spss(file = filename, col_select = c(1,2,20)))## 20 = INHP100HGEST, standardized household income
+
+      temp_data = temp_data[B, on=c("RINPERSOONSHKW","RINPERSOONHKW"), nomatch =NULL]
+      
+      temp_data$YEAR = substr(dir,5,8)
+
+      INHATAB_data = rbindlist(list(INHATAB_data,temp_data))
+      rm(temp_data)
+    }
+}
+
+
+INHP100HGEST_label = attr(INHATAB_data$INHP100HGEST,which = "label")
+INHP100HGEST_labels = attr(INHATAB_data$INHP100HGEST,which = "labels")
+
+
+IHI_data[,INHP100HGEST:= as.character(INHP100HGEST)]
+INHATAB_data[,INHP100HGEST:= as.character(INHP100HGEST)]
+
+INHATAB_data = rbindlist(list(IHI_data,INHATAB_data))
+rm(IHI_data)
+
+attr(INHATAB_data$INHP100HGEST, "label") = INHP100HGEST_label
+attr(INHATAB_data$INHP100HGEST,"labels")= INHP100HGEST_labels
+
+```
+# 11. Wealth information, optional
+```{r}
+#start_time = Sys.time()
+
+#VEHTAB_common_path = "G:\\InkomenBestedingen\\VEHTAB\\"
+#VEHTAB_primary_dirs = list.files(VEHTAB_common_path)
+
+#VEHTAB_primary_dirs = VEHTAB_primary_dirs[grep("^VEH+", VEHTAB_primary_dirs) ]
+#VEHTAB_primary_dirs = VEHTAB_primary_dirs[grep("+.sav", VEHTAB_primary_dirs)]
+# create an empty dataframe
+#VEHTAB_data = data.table()
+
+#for(dir in VEHTAB_primary_dirs){
+    
+  # define root folder with year included
+    #sub_folder = (paste(VEHTAB_common_path,dir,sep=""))
+      
+      # get the filename inside the folder
+    #filename = sub_folder[grep("+.sav", sub_folder)][length(grep("+.sav", sub_folder))]
+    #print((filename))
+   # temp_data = as.data.table(read_spss(file = filename, col_select =c(1,2,3,4)))
+    #setnames(temp_data, colnames(temp_data), c("RINPERSOONS" ,"RINPERSOON","ICDCODE","YEAR"))
+    # temp_data$RINPERSOON = as.character(temp_data$RINPERSOON)
+    # temp_data$RINPERSOONHKW = as.character(temp_data$RINPERSOONHKW)
+    #A = unique(INPATAB_data$RINPERSOONHKW)
+    #temp_data = temp_data[RINPERSOONHKW %in% A]
+    #temp_data = temp_data[A, on=c("RINPERSOONHKW"), nomatch =NULL]
+    
+    #temp_data$YEAR = substr(dir,4,7)
+
+   # VEHTAB_data = rbindlist(list(VEHTAB_data,temp_data))
+    #rm(temp_data)
+    
+#}
+
+#end_time = Sys.time()
+
+#end_time - start_time
+```
+
+# 12. Medication information (from medicijntab, only ATC4, which is based on Vektis declaration information) (in normal CBS: this can be done in 3 or more parts, not med_primary_dirs[1:15], but 1:5, 6:10 etc), optional
+```{r}
+med_common_path = "G:\\GezondheidWelzijn\\MEDICIJNTAB\\"
+med_primary_dirs = list.files(med_common_path)
+
+# choose years: 2006 to 2020
+med_primary_dirs = med_primary_dirs[1:14]#(of 15 = 2006 - 2020 )#tijdelijk aangepast naar 2019, omdat 2020 2 bestanden heeft
+
+Med_data = data.table()
+
+
+# loop for each year
+for(dir in med_primary_dirs){
+
+  # define root folder with year included
+    sub_folder = list.files(paste(med_common_path,dir,sep=""))
+
+    # do load the data if there is a file inside the folder
+    if (any(grepl("+.sav", sub_folder))) {
+
+      # get the filename inside the folder
+      filename = sub_folder[grep("+.sav", sub_folder)]
+
+      temp_data = as.data.table(read_spss(file = paste(med_common_path,dir,"\\",filename,sep="") ))
+
+      temp_data = temp_data[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+
+      temp_data[, "year" := dir]
+
+      Med_data = rbindlist(list(Med_data,temp_data))
+      rm(temp_data)
+      }
+}
+
+#add med files 2020 (2 files) and 2021 
+med2020= as.data.table(read_spss("G:\\GezondheidWelzijn\\MEDICIJNTAB\\2020\\MEDICIJN2020TABV1.sav",col_select = c(1,2,3)))
+med2020_tab2= as.data.table(read_spss("G:\\GezondheidWelzijn\\MEDICIJNTAB\\2020\\MEDICIJN2020TABV2.sav",col_select = c(1,2,3)))
+med2021= as.data.table(read_spss("G:\\GezondheidWelzijn\\MEDICIJNTAB\\2021\\MEDICIJN2021TABV1.sav",col_select = c(1,2,3)))
+head(Med_data)
+str(Med_data)
+med2020 = med2020[, year := "2020"]
+med2020_tab2 = med2020_tab2[, year := "2020"]
+med2021 = med2021[, year := "2021"]
+Med_data = rbind(Med_data, med2020)
+Med_data = rbind(Med_data, med2020_tab2)
+Med_data = rbind(Med_data, med2021)
+
+Med_data = Med_data[A, on=c("RINPERSOONS" ,"RINPERSOON"), nomatch =NULL]
+
+```
+
+# 13. Preprocess med file (we do this here so the file to save contains only ATC we need, and is smaller), optional
+```{r}
+# ## recode Med_data from 2006 - end, recode to dm_atc, antithromb_atc and statin_atc, use this to exclude patients as previous CVD and/or dm. Look for these med in the year before T0
+# 
+setkey(Med_data, "RINPERSOONS" ,"RINPERSOON")
+Med_data = Med_data[order(RINPERSOONS, RINPERSOON,year)]
+uniqueN(Med_data$RINPERSOON)
+
+## Preprocessing medication data for statin, dm  and antithrombotic med
+#select the rows with statin or dm or antithrombotic med
+Med_data = Med_data[ATC4 %like% "C10A"| ATC4 %like% "A10"| ATC4 %like% "B01A"]
+
+#med use for previous dm and event
+#statin use
+Med_data[, statin_atc := ifelse(ATC4 %like% "C10A", 1,NA)]
+
+#drugs used in diabetes
+Med_data[, dm_atc := ifelse(ATC4 %like% "A10", 1,NA) ]
+
+#antithrombotic med B01A
+Med_data[, antithromb_atc := ifelse(ATC4 %like% "B01A", 1,NA)]
+
+
+setkey(Med_data, "RINPERSOONS" ,"RINPERSOON", "year")
+Med_data[, statin_atc := na.locf(statin_atc, na.rm = FALSE),by= c("RINPERSOONS" ,"RINPERSOON", "year")]
+Med_data[, dm_atc := na.locf(dm_atc, na.rm = FALSE), by= c("RINPERSOONS" ,"RINPERSOON", "year")]
+Med_data[, antithromb_atc := na.locf(antithromb_atc, na.rm = FALSE), c("RINPERSOONS" ,"RINPERSOON", "year")]
+Med_data[, statin_atc := na.locf(statin_atc, fromLast = T, na.rm = F), by= c("RINPERSOONS" ,"RINPERSOON", "year")]
+Med_data[, dm_atc := na.locf(dm_atc, fromLast = T, na.rm = F), by= c("RINPERSOONS" ,"RINPERSOON", "year")]
+Med_data[, antithromb_atc := na.locf(antithromb_atc, fromLast = T ,na.rm = FALSE), by= c("RINPERSOONS" ,"RINPERSOON", "year")]
+
+Med_data <- Med_data[, -c("ATC4")]
+
+Med_data = Med_data[!duplicated(Med_data, by=colnames(Med_data), fromLast = T)]
+uniqueN(Med_data$RINPERSOON) #
+# 
+save(A, ADD_DATA, INHATAB_data, INPATAB_data, Med_data, file = "H:\\Janet Kist\\Article 5\\data\\Suriname_cbs.RData")
+# 
+
+```
+# 14. Highest attained education in 3 categories
+```{r}
+educ2013= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2013\\HOOGSTEOPL2013TABV3.sav",col_select = c(1,2,6,7)))
+educ2014= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2014\\HOOGSTEOPL2014TABV3.sav",col_select = c(1,2,6,7)))
+educ2015= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2015\\HOOGSTEOPL2015TABV3.sav",col_select = c(1,2,6,7)))
+educ2016= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2016\\HOOGSTEOPL2016TABV2.sav",col_select = c(1,2,6,7)))
+educ2017= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2017\\HOOGSTEOPL2017TABV3.sav",col_select = c(1,2,6,7)))
+educ2018= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2018\\HOOGSTEOPL2018TABV3.sav",col_select = c(1,2,6,7)))
+educ2019= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2019\\HOOGSTEOPL2019TABV2.sav",col_select = c(1,2,13,14)))
+educ2020= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2020\\HOOGSTEOPL2020TABV2.sav",col_select = c(1,2,13,14)))
+educ2021= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2021\\HOOGSTEOPL2021TABV2.sav",col_select = c(1,2,13,14)))
+educ2022= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2022\\HOOGSTEOPL2022TABV1.sav",col_select = c(1,2,13,14)))
+
+educ2016= as.data.table(read_spss("G:\\Onderwijs\\HOOGSTEOPLTAB\\2016\\HOOGSTEOPL2016TABV2.sav"))
+t = educ2016[is.na("OPLNIVSOI2016AGG4HBMETNIRWO")]
+
+
+educ2013 = educ2013[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2014 = educ2014[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2015 = educ2015[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2016 = educ2016[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2017 = educ2017[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2018 = educ2018[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+educ2019 = educ2019[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL] 
+educ2020 = educ2020[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL] 
+educ2021 = educ2021[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL] 
+educ2022 = educ2022[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL] 
+
+uniqueN(educ2021$RINPERSOON)#
+uniqueN(educ2017$RINPERSOON)#
+uniqueN(educ2013$RINPERSOON)#
+
+#utility file for categorization
+educ1 = as.data.table(read_spss("K:\\Utilities\\Code_Listings\\SSBreferentiebestanden\\OPLNIVSOI2016AGG4HBMETNIRWOREFV1.sav",col_select = c(1,4)))
+educ2 = as.data.table(read_spss("K:\\Utilities\\Code_Listings\\SSBreferentiebestanden\\OPLNIVSOI2021AGG4HBMETNIRWOREFV1.sav", col_select = c(1,4)))
+educ_genoten_1 =as.data.table(read_spss("K:\\Utilities\\Code_Listings\\SSBreferentiebestanden\\OPLNIVSOI2016AGG4HGMETNIRWOREFV1.sav"))
+educ_genoten_2 =as.data.table(read_spss("K:\\Utilities\\Code_Listings\\SSBreferentiebestanden\\OPLNIVSOI2021AGG4HGMETNIRWOREFV1.sav"))                             
+
+setnames(educ1, old = "OPLNIVSOI2016AGG4HBmetNIRWO", new ="OPLNIVSOI2016AGG4HBMETNIRWO")
+setnames(educ_genoten_1, old = "OPLNIVSOI2016AGG4HGmetNIRWO", new ="OPLNIVSOI2016AGG4HGMETNIRWO")
+#setnames(educ2, old = "OPLNIVSOI2021AGG4HBmetNIRWO", new ="OPLNIVSOI2021AGG4HBMETNIRWO")
+
+
+educ2013 = merge(educ2013, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2014 = merge(educ2014, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2015 = merge(educ2015, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2016 = merge(educ2016, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2017 = merge(educ2017, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2018 = merge(educ2018, educ1, by = "OPLNIVSOI2016AGG4HBMETNIRWO", all.x = TRUE)
+educ2019 = merge(educ2019, educ2, by = "OPLNIVSOI2021AGG4HBmetNIRWO", all.x = TRUE)
+educ2020 = merge(educ2020, educ2, by = "OPLNIVSOI2021AGG4HBmetNIRWO", all.x = TRUE)
+educ2021 = merge(educ2021, educ2, by = "OPLNIVSOI2021AGG4HBmetNIRWO", all.x = TRUE)
+educ2022 = merge(educ2022, educ2, by = "OPLNIVSOI2021AGG4HBmetNIRWO", all.x = TRUE)
+
+educ2013 = merge(educ2013, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO", all.x = TRUE)
+educ2014 = merge(educ2014, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO", all.x = TRUE)
+educ2015 = merge(educ2015, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO" , all.x = TRUE)
+educ2016 = merge(educ2016, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO" , all.x = TRUE)
+educ2017 = merge(educ2017, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO" , all.x = TRUE)
+educ2018 = merge(educ2018, educ_genoten_1, by = "OPLNIVSOI2016AGG4HGMETNIRWO" , all.x = TRUE)
+educ2019 = merge(educ2019, educ_genoten_2, by = "OPLNIVSOI2021AGG4HGmetNIRWO" , all.x = TRUE)
+educ2020 = merge(educ2020, educ_genoten_2, by = "OPLNIVSOI2021AGG4HGmetNIRWO" , all.x = TRUE)
+educ2021 = merge(educ2021, educ_genoten_2, by = "OPLNIVSOI2021AGG4HGmetNIRWO" , all.x = TRUE)
+educ2022 = merge(educ2022, educ_genoten_2, by = "OPLNIVSOI2021AGG4HGmetNIRWO" , all.x = TRUE)
+
+#
+names(educ2019)
+# names(educ2)
+# names(educ_genoten_2)
+
+educ2013 =  educ2013[, hbopl2013:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2014 =  educ2014[, hbopl2014:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2015 =  educ2015[, hbopl2015:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2016 =  educ2016[, hbopl2016:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2017 =  educ2017[, hbopl2017:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2018 =  educ2018[, hbopl2018:=OPLNIVSOI2016AGG1HBmetNIRWO]
+educ2019 =  educ2019[, hbopl2019:=OPLNIVSOI2021AGG1HBmetNIRWO]
+educ2020 =  educ2020[, hbopl2020:=OPLNIVSOI2021AGG1HBmetNIRWO]
+educ2021 =  educ2021[, hbopl2021:=OPLNIVSOI2021AGG1HBmetNIRWO]
+educ2022 =  educ2022[, hbopl2022:=OPLNIVSOI2021AGG1HBmetNIRWO]
+
+educ2013 =  educ2013[, hgopl2013:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2014 =  educ2014[, hgopl2014:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2015 =  educ2015[, hgopl2015:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2016 =  educ2016[, hgopl2016:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2017 =  educ2017[, hgopl2017:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2018 =  educ2018[, hgopl2018:=OPLNIVSOI2016AGG1HGmetNIRWO]
+educ2019 =  educ2019[, hgopl2019:=OPLNIVSOI2021AGG1HGmetNIRWO]
+educ2020 =  educ2020[, hgopl2020:=OPLNIVSOI2021AGG1HGmetNIRWO]
+educ2021 =  educ2021[, hgopl2021:=OPLNIVSOI2021AGG1HGmetNIRWO]
+educ2022 =  educ2022[, hgopl2022:=OPLNIVSOI2021AGG1HGmetNIRWO]
+
+educ2013 =  educ2013[, c("hgopl2013", "hbopl2013","RINPERSOONS","RINPERSOON")]
+educ2014 =  educ2014[, c("hgopl2014", "hbopl2014","RINPERSOONS","RINPERSOON")]
+educ2015 =  educ2015[, c("hgopl2015", "hbopl2015","RINPERSOONS","RINPERSOON")]
+educ2016 =  educ2016[, c("hgopl2016", "hbopl2016","RINPERSOONS","RINPERSOON")]
+educ2017 =  educ2017[, c("hgopl2017", "hbopl2017","RINPERSOONS","RINPERSOON")]
+educ2018 =  educ2018[, c("hgopl2018", "hbopl2018","RINPERSOONS","RINPERSOON")]
+educ2019 =  educ2019[, c("hgopl2019", "hbopl2019","RINPERSOONS","RINPERSOON")]
+educ2020 =  educ2020[, c("hgopl2020", "hbopl2020","RINPERSOONS","RINPERSOON")]
+educ2021 =  educ2021[, c("hgopl2021", "hbopl2021","RINPERSOONS","RINPERSOON")]
+
+t = educ2013[hgopl2013 != hbopl2013]#
+educ = merge(educ2013, educ2014, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2015, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2016, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2017, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2018, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2019, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2020, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2021, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+educ = merge(educ, educ2022, by = c("RINPERSOONS" ,"RINPERSOON"), all = TRUE)
+
+uniqueN(educ$RINPERSOON)#
+
+educ = educ[,highest_attained_education:=hbopl2022]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2021]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2020]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2019]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2018]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2017]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2016]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2015]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2014]
+educ = educ[is.na(highest_attained_education), highest_attained_education := hbopl2013]
+ t=educ[is.na(highest_attained_education)]#0
+ 
+ educ = educ[,highest_attained_and_followed_education:=hgopl2022]
+ educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2021]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2020]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2019]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2018]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2017]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2016]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2015]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2014]
+educ = educ[is.na(highest_attained_and_followed_education), highest_attained_and_followed_education := hgopl2013]
+ t=educ[is.na(highest_attained_and_followed_education)]#0
+
+ 
+ educ = educ[,c("RINPERSOONS" ,"RINPERSOON","highest_attained_education","highest_attained_and_followed_education" )]
+
+rm(educ1)
+rm(educ2)
+rm(educ2013)
+rm(educ2014)
+rm(educ2015)
+rm(educ2016)
+rm(educ2017)
+rm(educ2018)
+rm(educ2019)
+rm(educ2020)
+rm(educ2021)
+rm(educ2022)
+```
+
+# 15. Save the files (save as Rdata file of RDS file> smaller files than .sav files)
+```{r}
+
+#save as R files:
+# one file saveRDS()/readRDS(dt1. "dt1.rds")
+# one or more files load()/save(dt1,dt2, file = "dt.RData")
+save(A, ADD_DATA, INHATAB_data, INPATAB_data, educ, file = "H:/Janet Kist/Article 3/data/elan_cbs.RData")
+#load("H:/Janet Kist/Article 3/data/elan_cbs.RData")
+
+#for CBS data only A was selected previously (A = unique rinpersoon based on GP file: elan_pat)
+#ADD_DATA = ADD_DATA[A, on=c("RINPERSOONS","RINPERSOON"), nomatch =NULL]
+uniqueN(ADD_DATA$RINPERSOON) #
+
+cbs <- ADD_DATA[,-c("SOORTOBJECTNUMMER", "RINOBJECTNUMMER")]
+cbs = cbs[!duplicated(cbs, by=colnames(cbs), fromLast = T)]
+uniqueN(cbs$RINPERSOON)#
+
+cbs <- cbs[,lapply(.SD, as.vector)]#removes attributes
+
+
+#checks
+t = cbs[is.na(GBAGEBOORTEDATUM)]#
+t = cbs[is.na(RINPERSOON),]# 
+t = cbs[is.na(gem), ]
+uniqueN(t$RINPERSOON)# 
+na <- lapply(cbs,function(y)sum(length(which(is.na(y)))))#Na per column###> 
+t = cbs[is.na(ICDCODE)&!is.na(GBADatumOverlijden)]
+uniqueN(t$RINPERSOON)#
+
+
+dt = cbs
+```
+
+#16. Some preprocessing and checks(heb dit erin gelaten, maar is nog niet zo geordend op onderwerp)
+```{r}
+#change dates to date objects in preparation for lubridate calc
+dt = dt[, GBADATUMAANVANGADRESHOUDING := as.Date(GBADATUMAANVANGADRESHOUDING, format = "%Y%m%d")]
+dt = dt[, GBADATUMEINDEADRESHOUDING := as.Date(GBADATUMEINDEADRESHOUDING, format = "%Y%m%d")]
+dt = dt[, GBAGEBOORTEDATUM := as.Date(GBAGEBOORTEDATUM,format = "%Y%m%d")]
+dt = dt[, GBADatumOverlijden := as.Date(GBADatumOverlijden,format = "%Y%m%d")]
+
+dt[GBADatumOverlijden<as.Date("2022-07-01"), uniqueN(RINPERSOON)] # 
+
+# Tadres start en stop, first and last occuring adress dates ####
+dt = dt[, Tadres_start := min(GBADATUMAANVANGADRESHOUDING),by=c("RINPERSOONS", "RINPERSOON")]
+dt = dt[, Tadres_stop := max(GBADATUMEINDEADRESHOUDING), by=c("RINPERSOONS", "RINPERSOON")]
+#Tadres_start/stop is now the first/last occuring date in the region
+#visual check: Tadres_stop> is equal to death date
+
+#Tadres stop to 20xx ####
+#Tadres_stop is in many persons a date in 2050(this is set bij CBS, indicating still living on the last address when extraction was made)
+dt <- dt[Tadres_stop > "2023-01-01", Tadres_stop := as.Date("2023-01-01", format ="%Y-%m-%d") ]
+uniqueN(dt$RINPERSOON)#
+
+#checks
+e = dt[Tadres_start > Tadres_stop, .(RINPERSOONS, RINPERSOON,Tadres_start, Tadres_stop)]#0
+e = dt[ Tadres_start < 2007, .(RINPERSOONS, RINPERSOON,Tadres_start, Tadres_stop)]
+uniqueN(e$RINPERSOON) # 
+
+# T0 ####
+#if start date is before 1-1-2007> change to 2007 (Perined starts at 2000)
+dt = dt[, T0 := as.Date(ifelse(Tadres_start < as.Date("2007-01-01"),as.Date("2007-01-01"), Tadres_start))]
+e = dt[Tadres_stop < T0, .(RINPERSOONS, RINPERSOON,Tadres_start, Tadres_stop, T0)]
+uniqueN(e$RINPERSOON)#
+summary(dt$T0)#> geen missing
+
+#remove when Tadres_stop is before T0 date 
+dt = dt[!(Tadres_stop < T0)] 
+uniqueN(dt$RINPERSOON)#
+
+#make a date that a person turns 18
+dt = dt[ , date_18 := as.Date(GBAGEBOORTEDATUM + years(18)) ]
+# dt = dt[ , date_40 := as.Date(GBAGEBOORTEDATUM + years(40)) ]
+# dt = dt[ , date_80 := as.Date(GBAGEBOORTEDATUM + years(80)) ]
+# dt = dt[ , date_99 := as.Date(GBAGEBOORTEDATUM + years(110)) ]
+#summary(dt$date_40)> no missing
+
+# Aget0 ####
+#summary(dt$GBAGEBOORTEDATUM)> no missing
+dt = dt[, aget0 := round((GBAGEBOORTEDATUM %--% T0)/years(1), digits = 1)]
+dt = dt[,Tstop:= Tadres_stop]
+
+ #calculate age at Tstop####
+dt = dt[, ageTstop := round((GBAGEBOORTEDATUM %--% Tstop)/years(1), digits = 1)]  
+
+#new variable follow_up#### 
+dt = dt[, follow_up := round((T0 %--% Tstop)/years(1), digits = 2)]
+dt = dt[,follow_up_days:= round((T0 %--% Tstop)/days(1), digits = 0)]
+summary(dt$follow_up_days)#
+summary(dt$follow_up)#
+
+####
+uniqueN(dt$RINPERSOON)# 
+
+# Further checks and adjustments####
+
+#Tstop before T0####
+dt[(Tstop<T0), uniqueN(RINPERSOON)]#
+
+#T0 after Tstop####
+dt[(T0>Tstop), uniqueN(RINPERSOON)]#
+
+e = dt[follow_up_days < 0] 
+uniqueN(e$RINPERSOON)#
+
+#  adjust for date overlijden ####
+# in this file there are death dates of 2023, we do not need these (these are after cohort end) en these also have no ICD10 code
+#keep the files, change this death information input to na
+dt <- dt[,GBADatumOverlijden := ifelse(GBADatumOverlijden >= as.Date("2023-01-01", format ="%Y-%m-%d"), NA, GBADatumOverlijden)]
+# there are some date overlijden which are at a later date then tstop> we need the date, not the death
+#remove date overlijden when this occurs later than date tstop####
+t = dt[GBADatumOverlijden > Tstop]
+uniqueN(t$RINPERSOON)#
+dt <- dt[, GBADatumOverlijden := as.Date(ifelse((GBADatumOverlijden > Tstop),NA,GBADatumOverlijden))]
+dt <- dt[,ICDCODE := ifelse(is.na(GBADatumOverlijden),NA,ICDCODE)]
+
+#check if T stop matches date overlijden####
+e = dt[!is.na(GBADatumOverlijden) &  (Tstop!= GBADatumOverlijden)]#0
+#0> if there is a Overlijden, tstop = overlijden, otherwise you can adjust:
+#dt = dt[!is.na(GBADatumOverlijden) &  (Tstop> GBADatumOverlijden), Tstop := GBADatumOverlijden ]
+
+#remove when gbadatumoverlijden is before T0
+dt[GBADatumOverlijden<T0, uniqueN(RINPERSOON)]#
+dt[Tstop<T0, uniqueN(RINPERSOON)]#
+dt[Tstop==T0, uniqueN(RINPERSOON)]# 
+dt[GBADatumOverlijden==T0,uniqueN(RINPERSOON) ]#
+e= dt[!is.na(GBADatumOverlijden)& GBADatumOverlijden<T0]#
+#dt = dt[!is.na(GBADatumOverlijden)| GBADatumOverlijden>T0]
+uniqueN(dt$RINPERSOON)#
+
+#variable year to year T0, cohort entry####
+dt = dt[,year := year(T0)]
+
+#gem as first occuring gem code
+dt = dt[, gem_first := first(gem), by = c("RINPERSOONS" ,"RINPERSOON")]
+unique(dt$gem_first)
+# "0637" "1916" "1926" "0518" "1525" "0575" "0626" "0534" "1783" "0603" "0579" "0546" "0553" "0503" "0537" "0629" "0547"
+#  "0484" "0569" "1884" "0638" "1842"
+
+#Optional make file unique, keep first occurence####
+
+# names(dt)
+# "RINPERSOONS"                 "RINPERSOON"                  "GBADATUMAANVANGADRESHOUDING" "GBADATUMEINDEADRESHOUDING"  
+#  [5] "gem"                         "GBAGESLACHT"                 "GBAHERKOMSTGROEPERING"       "GBAGENERATIE"               
+#  [9] "GBAGEBOORTEDATUM"            "ICDCODE"                     "GBADatumOverlijden"          "Tadres_start"               
+# [13] "Tadres_stop"                 "proxy_start"                 "T0"                          "date_18"                    
+# [17] "aget0"                       "Tstop"                       "ageTstop"                    "follow_up"                  
+# [21] "follow_up_days"              "year"                        "gem_first"                  
+
+#Keep:
+#Tadres_start is first ever adres date in the area
+#T0 adjusted Tadres_start for 1/1/2007
+#c("RINPERSOONS", "RINPERSOON", "GBAGESLACHT", "GBAHERKOMSTGROEPERING", "GBAGENERATIE", "GBAGEBOORTEDATUM", "ICDCODE",  "GBADatumOverlijden", "Tadres_start", "T0", "date_18", "aget0", "Tstop",  "ageTstop", "follow_up", "follow_up_days", "year", "gem_first")               
+
+dt = dt[,c("RINPERSOONS", "RINPERSOON", "GBAGESLACHT", "GBAHERKOMSTGROEPERING", "GBAGENERATIE", "GBAGEBOORTEDATUM", "ICDCODE",  "GBADatumOverlijden", "Tadres_start", "T0", "date_18", "aget0", "Tstop",  "ageTstop", "follow_up", "follow_up_days", "year", "gem_first")  ]
+
+e = dt[!is.na(ICDCODE)]
+uniqueN(e$RINPERSOON)#
+
+e = dt[!is.na(GBADatumOverlijden)]
+uniqueN(e$RINPERSOON)#
+####
+
+#dt <- dt[, year_before_baseline := as.numeric(year)-1, by = c("RINPERSOONS" , "RINPERSOON")] # if you want to add a variable year before baseline, to be able to add variables from the year before baseline
+
+#FILL Na VaLUES, put icd code and gbadatumoverlijden on all lines
+dt[, ICDCODE := na.locf(ICDCODE, fromLast = TRUE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+dt[, ICDCODE := na.locf(ICDCODE, fromLast = FALSE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+
+dt[, GBADatumOverlijden := na.locf(GBADatumOverlijden, fromLast = TRUE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+dt[, GBADatumOverlijden := na.locf(GBADatumOverlijden, fromLast = FALSE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+
+#remove dupl, when all collumns are the same####
+dt = dt[!duplicated(dt, by=colnames(dt), fromLast = T)]
+#only unique individuals left
+
+#re-calculate age ad follow up at Tstop 
+dt = dt[, ageTstop := round((GBAGEBOORTEDATUM %--% Tstop)/years(1), digits = 1)] 
+dt = dt[, follow_up := round((T0 %--% Tstop)/years(1), digits = 2)]
+dt = dt[,follow_up_days:= round((T0 %--% Tstop)/days(1), digits = 0)]
+#dt = dt[follow_up_days>183]
+
+dt[follow_up_days<183, uniqueN(RINPERSOON)]#
+
+uniqueN(dt$RINPERSOON)#
+#= % calculate total data loss (also people leaving before 2007)
+```
+#17. gem code, see  #3. in other preprocessing files you could choose to run the merging on area here
+
+# 18. Attach file with different subdivision dt country of origin, based on SSB dt utility file SSBreferentiebestanden/LANDAKTUEELREFV12
+```{r}
+# landactueel toelichting doc:
+# code	omschrijving
+# 0	Autochtoon
+# 1	Marokko
+# 2	Turkije
+# 3	Suriname
+# 4	Voormalige Nederlandse Antillen en Aruba
+# 5	Overige niet-westerse landen
+# 6	Overige westerse landen
+# 7	Onbekend
+# ETNGRP
+# Standaard landcodering voor publicatie
+# Definitie
+# Omcodering van landcode naar een beperkt aantal (8) westerse en niet-westerse landen(groepen).
+# Toelichting bij de definitie
+# Door grens- en naamswijzigingen van landen in de loop van de tijd zijn de landen zoals opgenomen in de GBA niet de actuele landverwijzingen. 
+# Om in publicaties naar eenduidige landen te verwijzen moet er een omcodering plaatsvinden in een actuele, gestandaardiseerde landenpublicatielijst. 
+
+# 
+# Werelddelen
+# - onbekend
+# 1 Afrika
+# 2 Amerika
+# 3 Azie
+# 4 Europa
+# 5 Oceanie
+
+
+etngrp <- read_sav("K:/Utilities/Code_Listings/SSBreferentiebestanden/LANDAKTUEELREFV13.SAV")
+etngrp <- as.data.table(etngrp)
+etngrp <- etngrp[,.(LAND,WERELDDEEL, ETNGRP)]
+setnames(etngrp, old = "LAND", new = "GBAHERKOMSTGROEPERING")
+etngrp <- etngrp[, GBAHERKOMSTGROEPERING:= as.factor(etngrp$GBAHERKOMSTGROEPERING )]
+str(etngrp)
+
+dt <- merge(dt, etngrp, by = "GBAHERKOMSTGROEPERING", all.x = T)
+#first recode certain countries
+dt <- dt[, country_of_origin_cbs := fcase(
+                 GBAHERKOMSTGROEPERING == "6029", "Germans", 
+                 GBAHERKOMSTGROEPERING =="6039" , "Brittons",
+                 GBAHERKOMSTGROEPERING =="9030" , "Indonesian",
+                 GBAHERKOMSTGROEPERING =="6024" , "Indonesian",
+                 GBAHERKOMSTGROEPERING =="7028" , "middle or eastern Europe",
+                 GBAHERKOMSTGROEPERING =="5051" , "middle or eastern Europe", 
+                 GBAHERKOMSTGROEPERING =="7024" , "middle or eastern Europe",
+                 GBAHERKOMSTGROEPERING =="7065" , "middle or eastern Europe",
+                 GBAHERKOMSTGROEPERING =="5017" , "middle or eastern Europe",
+                 GBAHERKOMSTGROEPERING =="7064" , "middle or eastern Europe",
+                 GBAHERKOMSTGROEPERING =="7066" , "middle or eastern Europe", 
+                 GBAHERKOMSTGROEPERING =="6066" , "middle or eastern Europe", 
+                 GBAHERKOMSTGROEPERING =="7047" , "middle or eastern Europe", 
+                 GBAHERKOMSTGROEPERING =="5049" , "middle or eastern Europe", 
+                 GBAHERKOMSTGROEPERING =="6067" , "middle or eastern Europe", 
+                 default = NA)]
+
+# second step is recode 
+dt <- dt[is.na(country_of_origin_cbs), country_of_origin_cbs := fcase(
+  ETNGRP == "0",	"Dutch",
+  ETNGRP == "1", "Moroccan",
+  ETNGRP == "2", "Turkish",
+  ETNGRP == "3", "Surinamese",
+  ETNGRP == "4", "Antilleans",
+  ETNGRP == "5", "Other countries",
+  ETNGRP == "6", "Other countries",
+  default = "missing"
+)]
+
+dt <- dt[, werelddeel := fcase(
+  WERELDDEEL == "1", "Africa",
+  WERELDDEEL == "2", "America",
+  WERELDDEEL == "3", "Asia",
+  WERELDDEEL == "4", "Europe",
+  WERELDDEEL == "5", "Australia/Oceania",
+  default = "missing"
+)]
+
+
+dt <-dt[, country_of_birth_cbs :=  recode_factor(GBAHERKOMSTGROEPERING, "1234" = "asylum seeker", "6030" = "Dutch", "5007" = "Surinamese", "6043" = "Turkish", "5022" = "Moroccan", "9030" = "Indonesian", "6024" = "Indonesian", "7011" = "Antileans", "5095" = "Antileans", "5109" = "Antileans", "5110" = "Antileans" , "6029" = "Germans",.default = "other countries")]
+
+#save
+save(dt,file = "H:\\Janet Kist\\Article 3\\data\\elan_cbs_dt.rds")
+load("H:\\Janet Kist\\Article 3\\data\\elan_cbs_dt.rds")
+uniqueN(dt$RINPERSOON)
+```
+
+#19. Attach socioecon data only to T0 ####
+```{r}
+Socioecon_data = merge(INPATAB_data, INHATAB_data, by = c("RINPERSOONSHKW","RINPERSOONHKW","YEAR"), all.x =T, allow.cartesian = T)
+
+#slect only INHP100HGEST
+Socioecon_data = Socioecon_data[, .(RINPERSOONS, RINPERSOON, YEAR, INHP100HGEST)][order(RINPERSOONS, RINPERSOON,YEAR)]
+Socioecon_data = Socioecon_data[!duplicated(Socioecon_data,by=colnames(Socioecon_data),fromLast = T)]
+# now all household members except students have household income attached, for analyses we use INHP100HGEST, so keep this variable
+uniqueN(Socioecon_data$RINPERSOON)#
+
+
+Socioecon_data$INHP100HGEST[Socioecon_data$INHP100HGEST == ""]<- NA
+#inhp100hgest of previous year# (this years INHP100HGEST is not corrected for death> only part of the year as income)
+#inhp100hgest of the previous year
+#Socioecon_data = Socioecon_data[, INHP100HGEST_previous_year := shift(INHP100HGEST,n= 1L, type = "lag") , by = c("RINPERSOONS","RINPERSOON")]
+# first known socioeconomic data
+Socioecon_data = Socioecon_data[!is.na(INHP100HGEST)|INHP100HGEST!= "-1"|INHP100HGEST!="-2" ,INHP100HGEST_first := first(INHP100HGEST), by = c("RINPERSOON","RINPERSOONS")]
+
+#fill NAs with information on all lines per ID
+# Socioecon_data[, INHP100HGEST_previous_year := na.locf(INHP100HGEST_previous_year, fromLast = TRUE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+# Socioecon_data[, INHP100HGEST_previous_year := na.locf(INHP100HGEST_previous_year, fromLast = FALSE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+Socioecon_data[, INHP100HGEST_first := na.locf(INHP100HGEST_first, fromLast = TRUE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+Socioecon_data[, INHP100HGEST_first := na.locf(INHP100HGEST_first, fromLast = FALSE, na.rm = FALSE), by=c("RINPERSOONS" ,"RINPERSOON")]
+
+Socioecon_data = Socioecon_data[, .(RINPERSOONS, RINPERSOON, YEAR, INHP100HGEST, INHP100HGEST_first)]
+#INHP100HGEST_previous_year,
+Socioecon_data = Socioecon_data[!duplicated(Socioecon_data,by=c("RINPERSOON", "RINPERSOON", "YEAR"), fromLast = T)]
+
+# e = Socioecon_data[!is.na(INHP100HGEST_previous_year)]
+# uniqueN(e$RINPERSOON)#
+
+e = Socioecon_data[!is.na(INHP100HGEST)]
+uniqueN(e$RINPERSOON)#
+
+e = Socioecon_data[!is.na(INHP100HGEST_first)]
+uniqueN(e$RINPERSOON)#
+
+#keep column with first
+Socioecon_data = Socioecon_data[, .(RINPERSOONS, RINPERSOON, INHP100HGEST_first)]
+Socioecon_data = Socioecon_data[!duplicated(Socioecon_data,by=c("RINPERSOON", "RINPERSOON"), fromLast = T)]
+
+#t = Socioecon_data[is.na(INHP100HGEST_first)]
+
+
+#Socioecon_data$year <- as.character(Socioecon_data$year)
+#dt$year <- as.character(dt$year)
+
+# names(dt)
+names(dt)
+#merge socioeconomic with dt ####
+dt = merge(dt,Socioecon_data,by = c("RINPERSOONS" ,"RINPERSOON"), all.x=T)#, allow.cartesian = TRUE
+#fill NAs with information on all lines per ID
+
+#dt = dt[!duplicated(dt, by=colnames(dt), fromLast = T)]
+
+
+uniqueN(dt$RINPERSOON)#
+
+e = dt[!is.na(INHP100HGEST_first)]
+uniqueN(e$RINPERSOON)#
+
+
+e = dt[is.na(INHP100HGEST_first)]
+uniqueN(e$RINPERSOON)#
+
+
+e=dt[INHP100HGEST_first == "-1"] # onbekend inkomen
+uniqueN(e$RINPERSOON)#
+
+e=dt[INHP100HGEST_first == "-2"] # institutioneel huishouden
+uniqueN(e$RINPERSOON)#
+
+rm(INPATAB_data)
+rm(INHATAB_data)
+```
+# 20. Add information on urbanization, province, GGD area
+```{r}
+areas= read.xlsx("K:/Utilities/HULPbestanden/GebiedeninNederland/GIN2022.xlsx",1,startRow = 3, colIndex = c(1,2,14,26,51,52))
+
+areas = as.data.table(areas)
+areas[, gem := str_sub(gemeenten, 3,6)]
+#names(areas)
+setnames(areas, old = c("NA.", "NA..1", "NA..2", "Stedelijkheid", "NA..3"), new = c("gemeente name", "GGD", "Province", "urbanisation_code", "urbanisation" ))
+
+dt$gem = dt$gem_first
+names(dt)
+dt = merge(dt,areas, by = "gem",all.x=TRUE)
+```
+#21. Merge with education
+```{r}
+dt = merge(dt, educ, by = c("RINPERSOONS" ,"RINPERSOON"), all.x = TRUE)
+setnames(dt, old = "highest_attained_education", new = "education" )
+
+dt[!is.na(education), uniqueN(RINPERSOON)]/uniqueN(dt$RINPERSOON)*100 #
+
+hist(dt$follow_up)
+hist(dt$aget0)
+```
+
+#22. Save
+```{r}
+#save
+save(dt,file = "H:\\Janet Kist\\Article 3\\data\\elan_cbs_dt.rds")
+```
+
+
+
+
+
+
+
